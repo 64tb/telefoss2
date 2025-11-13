@@ -1,0 +1,175 @@
+name: Build Telegram-FOSS APK
+
+on:
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out repository
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      # 2. Set up Java (JDK 17)
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # 3. Set up Go
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: 'TMessagesProj/jni/boringssl/go.sum'
+
+      # 4. Install Ninja and YASM
+      - name: Install Ninja and YASM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build yasm
+
+      # 5. Set up Android NDK
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r21e
+
+      # 6. Build Native Dependencies
+      - name: Build Native Dependencies
+        run: |
+          cd TMessagesProj/jni
+          export NDK=${{ steps.setup-ndk.outputs.ndk-path }}
+          export NINJA_PATH=$(which ninja)
+          ./build_libvpx_clang.sh
+          ./build_ffmpeg_clang.sh
+          ./patch_ffmpeg.sh
+          ./patch_boringssl.sh
+          ./build_boringssl.sh
+          cd ../..
+
+      # 7. Free up Disk Space
+      - name: Free up Disk Space
+        run: |
+          echo "Listing top directories before cleanup..."
+          df -h
+          sudo apt-get clean
+          rm -rf /usr/local/lib/android/sdk/ndk/*
+          echo "Listing top directories after cleanup..."
+          df -h
+
+      # 8. Create API_KEYS file from secrets
+      - name: Create API_KEYS file from secrets
+        run: |
+          if [ -z "${{ secrets.APP_ID }}" ] || [ -z "${{ secrets.APP_HASH }}" ]; then
+            echo "::warning::API_ID or APP_HASH secrets are missing."
+          else
+            echo "APP_ID = ${{ secrets.APP_ID }}" > API_KEYS
+            echo "APP_HASH = ${{ secrets.APP_HASH }}" >> API_KEYS
+            echo "Successfully created API_KEYS file."
+          fi
+        shell: bash
+
+         # 9. APPLY FINAL MODIFICATIONS — SPOOF DEVICE + HIDE OTHER SESSIONS
+      - name: Apply Final App Modifications
+        run: |
+          echo "=========================================="
+          echo "Applying final app modifications..."
+          echo "=========================================="
+
+          SESSION_FILE="TMessagesProj/src/main/java/org/telegram/ui/SessionsActivity.java"
+          UTILS_FILE="TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java"
+          CELL_FILE="TMessagesProj/src/main/java/org/telegram/ui/Cells/SessionCell.java"
+
+          # === MODIFY SessionsActivity.java ===
+          if [ -f "$SESSION_FILE" ]; then
+            echo "Modifying $SESSION_FILE to show only Samsung F15..."
+
+            # Method 1: Clear other sessions after loading
+            sed -i '/ttlDays = res\.authorization_ttl_days;/i\
+                    // MODIFIED: Show only current device as Samsung F15\
+                    sessions.clear();\
+                    passwordSessions.clear();\
+                    if (currentSession != null) {\
+                        currentSession.device_model = "Samsung F15";\
+                        currentSession.system_version = "Android 15";\
+                        currentSession.platform = "Android";\
+                        currentSession.app_name = "Telegram";\
+                        currentSession.app_version = "10.14";\
+                        currentSession.country = "Meerut, Uttar Pradesh";\
+                        currentSession.region = "Meerut, Uttar Pradesh";\
+                    }' "$SESSION_FILE"
+
+            # Method 2: Prevent adding other sessions
+            sed -i 's/} else {[[:space:]]*sessions\.add(authorization);/} else {\
+                        \/\/ MODIFIED: Skip adding other sessions\
+                        \/\/ sessions.add(authorization);/g' "$SESSION_FILE"
+
+            # Method 3: Hide web sessions
+            sed -i 's|sessions\.addAll(res\.authorizations);|\/\/ MODIFIED: Hide web sessions\
+                    \/\/ sessions.addAll(res.authorizations);|g' "$SESSION_FILE"
+
+            # Force display values everywhere
+            sed -i 's|authorization\.device_model|"Samsung F15"|g' "$SESSION_FILE"
+            sed -i 's|authorization\.system_version|"Android 15"|g' "$SESSION_FILE"
+            sed -i 's|authorization\.platform|"Android"|g' "$SESSION_FILE"
+            sed -i 's|authorization\.app_name|"Telegram"|g' "$SESSION_FILE"
+            sed -i 's|authorization\.app_version|"10.14"|g' "$SESSION_FILE"
+            sed -i 's|authorization\.country|"Meerut, Uttar Pradesh"|g' "$SESSION_FILE"
+            sed -i 's|authorization\.region|"Meerut, Uttar Pradesh"|g' "$SESSION_FILE"
+
+            echo "✓ $SESSION_FILE modified successfully"
+          else
+            echo "::error::$SESSION_FILE not found!"
+          fi
+
+          # === MODIFY AndroidUtilities.java ===
+          if [ -f "$UTILS_FILE" ]; then
+            echo "Modifying $UTILS_FILE for global device spoofing..."
+            sed -i -e 's/Build\.MODEL/"F15"/g' \
+                   -e 's/Build\.MANUFACTURER/"Samsung"/g' \
+                   -e 's/Build\.VERSION\.RELEASE/"15"/g' \
+                   -e 's/Build\.BRAND/"Samsung"/g' \
+                   -e 's/Build\.DEVICE/"F15"/g' \
+                   "$UTILS_FILE"
+            echo "✓ $UTILS_FILE modified"
+          fi
+
+          # === MODIFY SessionCell.java (UI Layer Backup) ===
+          if [ -f "$CELL_FILE" ]; then
+            echo "Modifying $CELL_FILE for UI consistency..."
+            sed -i 's|session\.device_model|"Samsung F15"|g' "$CELL_FILE"
+            sed -i 's|session\.system_version|"Android 15"|g' "$CELL_FILE"
+            sed -i 's|session\.platform|"Android"|g' "$CELL_FILE"
+            sed -i 's|session\.app_name|"Telegram"|g' "$CELL_FILE"
+            sed -i 's|session\.app_version|"10.14"|g' "$CELL_FILE"
+            sed -i 's|session\.country|"Meerut, Uttar Pradesh"|g' "$CELL_FILE"
+            sed -i 's|session\.region|"Meerut, Uttar Pradesh"|g' "$CELL_FILE"
+            echo "✓ $CELL_FILE modified"
+          fi
+
+          echo "=========================================="
+          echo "✓ All modifications applied successfully!"
+          echo "=========================================="
+
+      # 10. Build APK with Gradle
+      - name: Build APK with Gradle
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleAfatDebug --info
+
+      # 11. Upload APK as Artifact
+      - name: Upload APK as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-foss-apk
+          path: TMessagesProj/build/outputs/apk/afat/debug/*.apk
+          retention-days: 7
